@@ -1,5 +1,13 @@
 import Order from '../models/orders.js'
 import razorpay from 'razorpay';
+import crypto from 'crypto'
+
+function generateOrderNumber(orderId) {
+  const hash = crypto.createHash('md5').update(orderId.toString()).digest('hex');
+  const numericHash = parseInt(hash.slice(0, 6), 16);
+  const sixDigitNumber = numericHash % 1000000; // Ensure it's a 6-digit number
+  return sixDigitNumber.toString().padStart(6, '0');
+}
 
 const razorpayClient = new razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
@@ -17,7 +25,7 @@ export const getAllOrders = async (req, res) => {
 }   
 
 export const verifyOrder = async (req, res) => {
-  const { razorpay_payment_id, razorpay_order_id, razorpay_signature, total } = req.body;
+  const { razorpay_payment_id, razorpay_order_id, razorpay_signature, total, customer, products, shippingAddress } = req.body;
 
   try {
       // Fetch payment details from Razorpay
@@ -30,10 +38,25 @@ export const verifyOrder = async (req, res) => {
     // const result = razorpayClient.orders.verify(attributes);
     console.log('Payment verification status:', result);
     if (result) {
-      // Payment is valid, mark it as successful in your database
-      // Your database update logic goes here
+      const totalPrice = total/100 
+      const orderNumber = generateOrderNumber(order_id);
+      console.log("orderNumber",orderNumber);
+      const newOrder = new Order({
+        customer,
+        products,
+        totalAmount:totalPrice,
+        shippingAddress,
+        paymentStatus:status,
+        paymentId:razorpay_payment_id,
+        OrderId:order_id,
+        signature:razorpay_signature,
+        method,
+        orderNumber,
+        orderStatus:[{status:"Processing",timestamp:Date.now()}]
+      });
+      const savedOrder = await newOrder.save();
 
-      res.status(200).json({ success: true });
+      res.status(200).json({ success: true, message: 'Payment successful', order: savedOrder });
     } else {
       // Invalid payment
       res.status(400).json({ success: false, message: 'Invalid payment' });
@@ -45,9 +68,50 @@ export const verifyOrder = async (req, res) => {
 }
 
 
+export const statusUpdate = async (req, res) => {
+  const orderPhaseMapping = {
+    "Processing": 0,
+    "Packed": 1,
+    "Shipped": 2,
+    "Delivered": 3,
+    "Cancelled": 4,
+    "Refunded": 5,
+    "Completed": 6,
+  };
+  try {
+    const orderId = req.params.orderId;
+    const newStatus = req.body.status; // Assuming you send the new status in the request body
+
+    // Find the order by ID
+    const order = await Order.findById(orderId);
+
+    // Check if the order exists
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    // Add the new status to the orderStatus array
+    order.orderStatus.push({
+      status: newStatus,
+      timestamp: new Date(),
+    });
+    order.phase = orderPhaseMapping[newStatus];
+
+    // Save the updated order
+    await order.save();
+
+
+    res.status(200).json({ message: 'New status added successfully', order });
+  } catch (error) {
+    console.error('Error adding status:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+}
+
 
 
 export const createOrder = async (req, res) => {
+  // console.log("inside create order");
   try {
     const { amount } = req.body;
     const order = await razorpayClient.orders.create({
@@ -67,7 +131,7 @@ export const createOrder = async (req, res) => {
 export const getOrderDetails = async (req, res) => {
   try {
     const orderId = req.params.orderId;
-    const order = await Order.findById(orderId);
+    const order = await Order.findById(orderId).populate('products.product');
     if (!order) {
       return res.status(404).json({ error: 'Order not found' });
     }
@@ -100,9 +164,12 @@ export const updateOrder = async (req, res) => {
 
 
 export const getOrderHistory = async (req, res) => {
+  console.log("helo inside history ");
   try {
-    const userId = req.user._id; 
+    const userId = req.params.userId; 
     const orderHistory = await Order.find({ customer: userId });
+    console.log("orderHistory",orderHistory);
+    console.log("userId",userId);
     res.json(orderHistory);
   } catch (error) {
     console.error('Error getting order history:', error);
